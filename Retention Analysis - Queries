@@ -1,75 +1,121 @@
 
-# -- This query creates a consolidated log of user activity(activity daily logs) from various data sources.
-
+# Retention Matrix :-
 
 
 WITH activity_logs AS (
-    SELECT
+    SELECT 
+        user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(last_sync_date)
+    FROM users 
+    WHERE last_sync_date IS NOT NULL
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(event_time)
+    FROM app_events 
+    WHERE feature_category IN ('Recovery', 'Strain', 'Sleep')
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(activity_start)
+    FROM activity_data
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+-- STEP 2: Assign each user to a cohort based on signup month
+-- We take the created_at date from the users table and bucket it into 
+-- the first day of the signup month to represent their cohort.
+
+
+cohorts AS (
+    SELECT 
         user_id,
-        DATE(session_start) AS activity_date
-    FROM
-        app_sessions
-    WHERE
-        session_duration_seconds >= 30
+        DATE_FORMAT(created_at, '%Y-%m-01') AS cohort_month, -- cohort start
+        created_at AS signup_date
+    FROM users
+),
 
-    UNION
+-- STEP 3: Merge activity logs with cohort assignment
+-- For each activity, we attach the cohort info of the user
 
-    SELECT
+
+user_activity_with_cohort AS (
+    SELECT 
+        a.user_id, 
+        a.activity_date, 
+        c.cohort_month,
+        c.signup_date
+    FROM activity_logs a
+    JOIN cohorts c ON a.user_id = c.user_id
+),
+
+-- STEP 4: Calculate the activity month offset
+-- For each activity, compute how many months after signup it occurred
+-- This allows us to later build retention curves (Month 0 = signup month).
+
+
+activity_with_periods AS (
+    SELECT 
         user_id,
-        DATE(last_sync_date)
-    FROM
-        users
-    WHERE
-        last_sync_date IS NOT NULL
+        cohort_month,
+        DATE_FORMAT(activity_date, '%Y-%m-01') AS activity_month,
+        TIMESTAMPDIFF(
+            MONTH,
+            cohort_month, 
+            DATE_FORMAT(activity_date, '%Y-%m-01')
+        ) AS month_number
+    FROM user_activity_with_cohort
+),
 
-    UNION
+-- STEP 5: Count retained users per cohort per month
+-- Retained_users = distinct users from a cohort active in that month offset
 
-    SELECT
-        user_id,
-        DATE(event_time)
-    FROM
-        app_events
-    WHERE
-        feature_category IN ('Recovery', 'Strain', 'Sleep')
 
-    UNION
+retention AS (
+    SELECT 
+        cohort_month, 
+        month_number,
+        COUNT(DISTINCT user_id) AS retained_users
+    FROM activity_with_periods
+    GROUP BY cohort_month, month_number
+),
 
-    SELECT
-        user_id,
-        DATE(activity_start)
-    FROM
-        activity_data
+-- STEP 6: Get cohort sizes
+-- Cohort_size = number of distinct users who signed up in that cohort
 
-    UNION
 
-    SELECT
-        user_id,
-        DATE(calculated_at)
-    FROM
-        daily_scores
+cohort_sizes AS (
+    SELECT 
+        cohort_month, 
+        COUNT(DISTINCT user_id) AS cohort_size
+    FROM cohorts
+    GROUP BY cohort_month
 )
-SELECT *
-FROM activity_logs;
+
+-- FINAL STEP: Join retention numbers with cohort sizes
+-- Then calculate the retention rate = retained_users / cohort_size
 
 
-
-
-
-
-
-
-
-
-# Cohort assignment by signup month
-       
-       WITH cohorts AS (SELECT 
-         user_id , 
-          DATE_FORMAT(created_at, '%Y-%m-01') AS cohort_month , created_at AS signup_date 
-            FROM 
-             users )
-       SELECT *
-        FROM 
-         cohorts 
-          ORDER BY  cohort_month, signup_date 
-           
-           
+SELECT 
+    r.cohort_month,
+    r.month_number,
+    r.retained_users,
+    c.cohort_size,
+    ROUND(100.0 * r.retained_users / c.cohort_size, 2) AS retention_rate
+FROM retention r
+JOIN cohort_sizes c 
+    ON r.cohort_month = c.cohort_month
+ORDER BY r.cohort_month, r.month_number;
