@@ -119,3 +119,140 @@ FROM retention r
 JOIN cohort_sizes c 
     ON r.cohort_month = c.cohort_month
 ORDER BY r.cohort_month, r.month_number;
+
+
+
+
+
+# Segment wise retention analysis :
+
+USE pp1;
+
+-- Step 1: Build activity logs (all user actions that mean they are "active")
+WITH activity_logs AS (
+    SELECT user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+
+    UNION
+
+    SELECT user_id, DATE(last_sync_date)
+    FROM users
+    WHERE last_sync_date IS NOT NULL
+
+    UNION
+
+    SELECT user_id, DATE(event_time)
+    FROM app_events
+    WHERE feature_category IN ('Recovery','Strain','Sleep')
+
+    UNION
+
+    SELECT user_id, DATE(activity_start)
+    FROM activity_data
+
+    UNION
+
+    SELECT user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+-- Step 2: Assign cohorts and add segmentation info
+cohorts AS (
+    SELECT 
+        user_id,
+        DATE_FORMAT(created_at, '%Y-%m-01') AS cohort_month, -- signup month
+        created_at AS signup_date,
+        country,
+        device_model,
+        app_platform,
+        acquisition_source,
+        gender,
+        age_group
+    FROM users
+),
+
+-- Step 3: Merge activity with cohort + segment info
+user_activity_with_cohort AS (
+    SELECT 
+        a.user_id,
+        a.activity_date,
+        c.cohort_month,
+        c.signup_date,
+        c.country,
+        c.device_model,
+        c.app_platform,
+        c.acquisition_source,
+        c.gender,
+        c.age_group
+    FROM activity_logs a
+    JOIN cohorts c
+        ON a.user_id = c.user_id
+),
+
+-- Step 4: Map activities to months since signup
+activity_with_periods AS (
+    SELECT 
+        user_id,
+        cohort_month,
+        DATE_FORMAT(activity_date, '%Y-%m-01') AS activity_month,
+        TIMESTAMPDIFF(
+            MONTH,
+            cohort_month,
+            DATE_FORMAT(activity_date, '%Y-%m-01')
+        ) AS month_number,
+        country,
+        device_model,
+        app_platform,
+        acquisition_source,
+        gender,
+        age_group
+    FROM user_activity_with_cohort
+),
+
+-- Step 5: Count retained users by cohort, month, and segment
+retention AS (
+    SELECT 
+        cohort_month,
+        month_number,
+        country,
+        app_platform,
+        acquisition_source,
+        gender,
+        COUNT(DISTINCT user_id) AS retained_users
+    FROM activity_with_periods
+    GROUP BY cohort_month, month_number, country, app_platform, acquisition_source, gender
+),
+
+-- Step 6: Cohort sizes by segment
+cohort_sizes AS (
+    SELECT 
+        cohort_month,
+        country,
+        app_platform,
+        acquisition_source,
+        gender,
+        COUNT(DISTINCT user_id) AS cohort_size
+    FROM cohorts
+    GROUP BY cohort_month, country, app_platform, acquisition_source, gender
+)
+
+-- Final Step: Retention % by cohort + segment
+SELECT 
+    r.cohort_month,
+    r.month_number,
+    r.country,
+    r.app_platform,
+    r.acquisition_source,
+    r.gender,
+    r.retained_users,
+    c.cohort_size,
+    ROUND(100.0 * r.retained_users / c.cohort_size, 2) AS retention_rate
+FROM retention r
+JOIN cohort_sizes c
+    ON r.cohort_month = c.cohort_month
+   AND r.country = c.country
+   AND r.app_platform = c.app_platform
+   AND r.acquisition_source = c.acquisition_source
+   AND r.gender = c.gender
+ORDER BY r.cohort_month, r.month_number, r.country, r.app_platform;
