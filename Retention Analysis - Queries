@@ -1,0 +1,75 @@
+
+# -- This query creates a consolidated log of user activity(activity daily logs) from various data sources.
+
+
+
+WITH activity_logs AS (
+    SELECT
+        user_id,
+        DATE(session_start) AS activity_date
+    FROM
+        app_sessions
+    WHERE
+        session_duration_seconds >= 30
+
+    UNION
+
+    SELECT
+        user_id,
+        DATE(last_sync_date)
+    FROM
+        users
+    WHERE
+        last_sync_date IS NOT NULL
+
+    UNION
+
+    SELECT
+        user_id,
+        DATE(event_time)
+    FROM
+        app_events
+    WHERE
+        feature_category IN ('Recovery', 'Strain', 'Sleep')
+
+    UNION
+
+    SELECT
+        user_id,
+        DATE(activity_start)
+    FROM
+        activity_data
+
+    UNION
+
+    SELECT
+        user_id,
+        DATE(calculated_at)
+    FROM
+        daily_scores
+)
+SELECT *
+FROM activity_logs;
+
+
+
+
+
+
+
+
+
+
+# Cohort assignment by signup month
+       
+       WITH cohorts AS (SELECT 
+         user_id , 
+          DATE_FORMAT(created_at, '%Y-%m-01') AS cohort_month , created_at AS signup_date 
+            FROM 
+             users )
+       SELECT *
+        FROM 
+         cohorts 
+          ORDER BY  cohort_month, signup_date 
+           
+           
