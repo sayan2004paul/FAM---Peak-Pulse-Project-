@@ -249,3 +249,96 @@ SELECT
 
   
 
+
+
+
+# Stickiness Ration Analysis : 
+
+
+WITH activity_logs AS (
+    SELECT 
+        user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(last_sync_date)
+    FROM users 
+    WHERE last_sync_date IS NOT NULL
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(event_time)
+    FROM app_events 
+    WHERE feature_category IN ('Recovery', 'Strain', 'Sleep')
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(activity_start)
+    FROM activity_data
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+-- add platform info
+activity_logs_device AS (
+    SELECT 
+        al.user_id,
+        al.activity_date,
+        u.app_platform
+    FROM activity_logs al
+    JOIN users u ON al.user_id = u.user_id
+),
+
+-- daily active users
+dau AS (
+    SELECT 
+        activity_date,
+        app_platform,
+        COUNT(DISTINCT user_id) AS dau 
+    FROM activity_logs_device
+    GROUP BY activity_date, app_platform
+),
+
+-- monthly active users
+mau AS (
+    SELECT 
+        DATE_FORMAT(activity_date, '%Y-%m') AS year_month,
+        app_platform,
+        COUNT(DISTINCT user_id) AS mau 
+    FROM activity_logs_device
+    GROUP BY DATE_FORMAT(activity_date, '%Y-%m'), app_platform
+),
+
+-- calculate stickiness ratio
+stickiness AS (
+    SELECT 
+        d.activity_date,
+        d.app_platform,
+        d.dau,
+        m.mau,
+        ROUND(100.0 * d.dau / m.mau, 2) AS stickiness_ratio
+    FROM dau d
+    JOIN mau m
+      ON DATE_FORMAT(d.activity_date, '%Y-%m') = m.year_month
+     AND d.app_platform = m.app_platform
+)
+
+-- final comparison: Android vs iOS
+SELECT 
+    s.activity_date,
+    MAX(CASE WHEN s.app_platform = 'Android' THEN s.stickiness_ratio END) AS android_stickiness,
+    MAX(CASE WHEN s.app_platform = 'iOS' THEN s.stickiness_ratio END) AS ios_stickiness,
+    (MAX(CASE WHEN s.app_platform = 'iOS' THEN s.stickiness_ratio END) -
+     MAX(CASE WHEN s.app_platform = 'Android' THEN s.stickiness_ratio END)) AS stickiness_gap
+FROM stickiness s
+GROUP BY s.activity_date
+ORDER BY s.activity_date;
