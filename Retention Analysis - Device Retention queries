@@ -1,0 +1,11 @@
+
+# Signup Distribution by Device
+
+ SELECT 
+ app_platform ,
+  COUNT(*) AS total_signups ,
+   ROUND(COUNT(*) *100.0 / SUM(COUNT(*)) OVER() ,2 ) AS pct_of_signups
+ FROM 
+  users 
+   GROUP BY 
+    app_platform 
