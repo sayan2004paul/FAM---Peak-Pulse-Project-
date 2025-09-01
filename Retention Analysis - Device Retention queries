@@ -9,3 +9,243 @@
   users 
    GROUP BY 
     app_platform 
+
+
+
+
+
+
+ # Acquisition channel-based retention 
+
+WITH activity_logs AS (
+    SELECT 
+        user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(last_sync_date)
+    FROM users 
+    WHERE last_sync_date IS NOT NULL
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(event_time)
+    FROM app_events 
+    WHERE feature_category IN ('Recovery', 'Strain', 'Sleep')
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(activity_start)
+    FROM activity_data
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+-- STEP 2: Assign each user to a cohort based on signup month
+-- We take the created_at date from the users table and bucket it into 
+-- the first day of the signup month to represent their cohort.
+
+
+cohorts AS (
+    SELECT 
+        user_id,
+        DATE_FORMAT(created_at, '%Y-%m-01') AS cohort_month, -- cohort start
+        created_at AS signup_date,
+        acquisition_source 
+    FROM users
+),
+
+-- STEP 3: Merge activity logs with cohort assignment
+-- For each activity, we attach the cohort info of the user
+
+
+user_activity_with_cohort AS (
+    SELECT 
+        a.user_id, 
+        a.activity_date, 
+        c.cohort_month,
+        c.signup_date
+    FROM activity_logs a
+    JOIN cohorts c ON a.user_id = c.user_id
+),
+
+-- STEP 4: Calculate the activity month offset
+-- For each activity, compute how many months after signup it occurred
+-- This allows us to later build retention curves (Month 0 = signup month).
+
+
+activity_with_periods AS (
+    SELECT 
+        user_id,
+        cohort_month,
+        DATE_FORMAT(activity_date, '%Y-%m-01') AS activity_month,
+        TIMESTAMPDIFF(
+            MONTH,
+            cohort_month, 
+            DATE_FORMAT(activity_date, '%Y-%m-01')
+        ) AS month_number
+    FROM user_activity_with_cohort
+),
+
+-- STEP 5: Count retained users per cohort per month
+-- Retained_users = distinct users from a cohort active in that month offset
+
+
+retention AS (
+    SELECT 
+        c.cohort_month, 
+        c.acquisition_source,
+	TIMESTAMPDIFF(MONTH, c.signup_date, a.activity_date) AS months_since_signup,
+    COUNT(DISTINCT C.user_id) AS users_active
+    FROM cohorts c 
+     JOIN activity_logs a ON c.user_id=a.user_id 
+    GROUP BY 1,2,3
+)
+
+-- STEP 6: Get cohort sizes
+-- Cohort_size = number of distinct users who signed up in that cohort
+
+
+SELECT 
+ cohort_month , acquisition_source, months_since_signup,
+  users_active 
+   FROM 
+    retention 
+     ORDER BY 
+       cohort_month , acquisition_source, months_since_signup
+
+
+
+
+
+
+
+
+
+
+
+
+# retention rates per month per device. :
+
+WITH activity_logs AS (
+    SELECT 
+        user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(last_sync_date)
+    FROM users 
+    WHERE last_sync_date IS NOT NULL
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(event_time)
+    FROM app_events 
+    WHERE feature_category IN ('Recovery', 'Strain', 'Sleep')
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(activity_start)
+    FROM activity_data
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+
+       
+       
+ 
+       
+       
+
+ cohorts AS (
+    SELECT 
+        u.user_id,
+        DATE_FORMAT(u.created_at, '%Y-%m-01') AS cohort_month,
+        u.created_at AS signup_date,
+        u.app_platform
+    FROM users u
+),
+retention AS (
+    SELECT
+        c.cohort_month,
+        c.app_platform,
+        TIMESTAMPDIFF(MONTH, c.signup_date, a.activity_date) AS months_since_signup,
+        COUNT(DISTINCT c.user_id) AS users_active
+    FROM cohorts c
+    JOIN activity_logs a ON c.user_id = a.user_id
+    GROUP BY 1,2,3
+),
+cohort_sizes AS (
+    SELECT cohort_month, app_platform, COUNT(DISTINCT user_id) AS cohort_size
+    FROM cohorts
+    GROUP BY 1,2
+)
+SELECT
+    r.cohort_month,
+    r.app_platform,
+    r.months_since_signup,
+    r.users_active,
+    cs.cohort_size,
+    ROUND(r.users_active * 100.0 / cs.cohort_size, 2) AS retention_rate_pct
+FROM retention r
+JOIN cohort_sizes cs 
+    ON r.cohort_month = cs.cohort_month AND r.app_platform = cs.app_platform
+ORDER BY r.cohort_month, r.app_platform, r.months_since_signup;
+
+
+
+
+
+
+
+
+
+#Churn Timing (Avg Retention Duration by Device :
+
+
+WITH first_last AS(
+
+SELECT 
+ u.user_id ,
+  u.app_platform , 
+  MIN(DATE(s.session_start)) AS first_active ,
+  MAX(DATE(s.session_start)) AS last_active 
+ FROM 
+  users u 
+   JOIN app_sessions s ON u.user_id=s.user_id 
+    GROUP BY 
+     1,2
+    
+)
+
+SELECT 
+ app_platform,
+ AVG(DATEDIFF(last_active,first_active)) AS avg_days_retained ,
+   MIN(DATEDIFF(last_active,first_active)) AS min_days_retained ,
+ MAX(DATEDIFF(last_active,first_active)) AS max_days_retained 
+  FROM 
+   first_last 
+    GROUP BY 
+     app_platform
+
+  
+
