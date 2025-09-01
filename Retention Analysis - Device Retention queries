@@ -342,3 +342,29 @@ SELECT
 FROM stickiness s
 GROUP BY s.activity_date
 ORDER BY s.activity_date;
+
+
+
+
+
+
+
+
+
+
+
+
+# Engagement (Avg Sessions per User) :
+
+
+
+SELECT 
+ u.app_platform , 
+  COUNT(s.session_id)/COUNT(DISTINCT u.user_id) AS avg_sessions_per_user,
+   AVG(s.session_duration_seconds) AS avg_session_length_in_sec
+ FROM 
+  users u 
+   JOIN 
+    app_sessions s ON u.user_id = s.user_id 
+     GROUP BY 
+      u.app_platform 
