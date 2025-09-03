@@ -381,3 +381,68 @@ SELECT
 FROM ttfv
 GROUP BY app_platform, acquisition_source
 ORDER BY app_platform, acquisition_source;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# First 7 days creash rate analysis (stability check) :
+
+
+
+WITH
+signups AS (
+  SELECT user_id, DATE(created_at) AS signup_date, app_platform, acquisition_source
+  FROM users
+),
+
+first7_sessions AS (
+  SELECT
+    s.user_id,
+    s.app_platform,
+    s.acquisition_source,
+    COUNT(*) AS sessions_7d,
+    SUM(CASE WHEN a.is_crashed THEN 1 ELSE 0 END) AS crashes_7d
+  FROM signups s
+  JOIN app_sessions a
+    ON a.user_id = s.user_id
+   AND DATE(a.session_start) BETWEEN s.signup_date AND DATE_ADD(s.signup_date, INTERVAL 7 DAY)
+  GROUP BY s.user_id, s.app_platform, s.acquisition_source
+),
+
+crash_metrics AS (
+  SELECT
+    app_platform,
+    acquisition_source,
+    COUNT(*) AS users_with_sessions_7d,
+    SUM(crashes_7d) AS total_crashes_7d,
+    ROUND(1.0 * SUM(crashes_7d) / NULLIF(SUM(sessions_7d),0), 4) AS crash_rate_per_session
+  FROM first7_sessions
+  GROUP BY app_platform, acquisition_source
+)
+
+SELECT * FROM crash_metrics
+ORDER BY app_platform, acquisition_source;
