@@ -137,7 +137,145 @@ SUM(did_core_view_7d) AS core_view_7d,
         cohort_month,app_platform ,acquisition_source
 
 
-   
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Month-1 retention vs onboarding completion
+
+-- Step 1: Signups base
+WITH signups AS (
+  SELECT 
+    u.user_id, 
+    DATE(u.created_at) AS signup_date,
+    DATE_FORMAT(u.created_at, '%Y-%m-01') AS cohort_month,
+    u.app_platform,
+    u.acquisition_source,
+    u.calibration_complete
+  FROM users u
+),
+
+-- Step 2: Month 1 activity (index-friendly filtering)
+m1_activity AS (
+  SELECT 
+    s.user_id,
+    COUNT(DISTINCT DATE(al.activity_date)) AS active_days_in_m1
+  FROM signups s
+  JOIN (
+      -- App sessions ≥ 30s
+      SELECT user_id, session_start AS activity_date
+      FROM app_sessions
+      WHERE session_duration_seconds >= 30
+  UNION ALL
+      -- Sync
+      SELECT user_id, last_sync_date
+      FROM users
+      WHERE last_sync_date IS NOT NULL
+  UNION ALL
+      -- Core events
+      SELECT user_id, event_time
+      FROM app_events
+      WHERE feature_category IN ('Recovery','Strain','Sleep')
+  UNION ALL
+      -- Workouts
+      SELECT user_id, activity_start
+      FROM activity_data
+  UNION ALL
+      -- Daily scores
+      SELECT user_id, calculated_at
+      FROM daily_scores
+  ) al
+    ON al.user_id = s.user_id
+   AND al.activity_date BETWEEN s.signup_date + INTERVAL 1 DAY 
+                            AND s.signup_date + INTERVAL 30 DAY
+  GROUP BY s.user_id
+),
+
+-- Step 3: First 7-day onboarding signals (with pre-filtered windows)
+first_7d AS (
+  SELECT
+    s.user_id,
+    s.signup_date,
+    s.cohort_month,
+    s.app_platform,
+    s.acquisition_source,
+    s.calibration_complete,
+
+    MIN(CASE WHEN asn.session_start IS NOT NULL THEN DATE(asn.session_start) END) AS first_session_date,
+    MIN(CASE WHEN u.last_sync_date BETWEEN s.signup_date AND s.signup_date + INTERVAL 7 DAY 
+             THEN DATE(u.last_sync_date) END) AS first_sync_date,
+    MIN(CASE WHEN ae.event_time IS NOT NULL THEN DATE(ae.event_time) END) AS first_core_view_date,
+    MIN(CASE WHEN ad.activity_start IS NOT NULL THEN DATE(ad.activity_start) END) AS first_workout_date,
+    MIN(CASE WHEN ds.calculated_at IS NOT NULL THEN DATE(ds.calculated_at) END) AS first_score_date
+
+  FROM signups s
+  LEFT JOIN app_sessions asn
+    ON asn.user_id = s.user_id
+   AND asn.session_start BETWEEN s.signup_date AND s.signup_date + INTERVAL 7 DAY
+   AND asn.session_duration_seconds >= 30
+  LEFT JOIN users u
+    ON u.user_id = s.user_id
+  LEFT JOIN app_events ae
+    ON ae.user_id = s.user_id
+   AND ae.event_time BETWEEN s.signup_date AND s.signup_date + INTERVAL 7 DAY
+   AND ae.feature_category IN ('Recovery','Strain','Sleep')
+  LEFT JOIN activity_data ad
+    ON ad.user_id = s.user_id
+   AND ad.activity_start BETWEEN s.signup_date AND s.signup_date + INTERVAL 7 DAY
+  LEFT JOIN daily_scores ds
+    ON ds.user_id = s.user_id
+   AND ds.calculated_at BETWEEN s.signup_date AND s.signup_date + INTERVAL 7 DAY
+  GROUP BY s.user_id, s.signup_date, s.cohort_month, s.app_platform, s.acquisition_source, s.calibration_complete
+),
+
+-- Step 4: Onboarding flags
+onboarding_flags AS (
+  SELECT
+    f.*,
+    (first_session_date IS NOT NULL) AS did_first_session_7d,
+    (first_sync_date IS NOT NULL) AS did_first_sync_7d,
+    (first_core_view_date IS NOT NULL) AS did_core_view_7d,
+    (first_workout_date IS NOT NULL) AS did_workout_7d,
+    (first_score_date IS NOT NULL) AS did_score_7d,
+
+    -- Activation flag
+    (
+      (first_sync_date IS NOT NULL)
+      OR (first_core_view_date IS NOT NULL)
+      OR (first_workout_date IS NOT NULL)
+      OR (first_score_date IS NOT NULL)
+    ) AS activated_7d
+  FROM first_7d f
+)
+
+-- Step 5: Final aggregation
+SELECT 
+  f.cohort_month,
+  f.app_platform,
+  f.acquisition_source,
+  COUNT(*) AS signups,
+  SUM(f.activated_7d) AS activated_7d,
+  SUM(CASE WHEN m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) AS m1_retained,
+  SUM(CASE WHEN f.activated_7d = 1 AND m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) AS m1_retained_if_activated,
+  SUM(CASE WHEN f.activated_7d = 0 AND m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) AS m1_retained_if_not_activated,
+
+  ROUND(100.0 * SUM(CASE WHEN m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) / COUNT(*), 2) AS m1_retention_rate,
+  ROUND(100.0 * SUM(CASE WHEN f.activated_7d = 1 AND m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) / NULLIF(SUM(f.activated_7d), 0), 2) AS m1_rate_if_activated,
+  ROUND(100.0 * SUM(CASE WHEN f.activated_7d = 0 AND m.active_days_in_m1 >= 1 THEN 1 ELSE 0 END) / NULLIF(COUNT(*) - SUM(f.activated_7d), 0), 2) AS m1_rate_if_not_activated
+
+FROM onboarding_flags f
+LEFT JOIN m1_activity m ON m.user_id = f.user_id
+GROUP BY f.cohort_month, f.app_platform, f.acquisition_source
+ORDER BY f.cohort_month, f.app_platform, f.acquisition_source;
 
 
 
