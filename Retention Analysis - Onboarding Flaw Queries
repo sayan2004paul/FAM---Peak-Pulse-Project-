@@ -279,3 +279,105 @@ ORDER BY f.cohort_month, f.app_platform, f.acquisition_source;
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Time-to-first-value (TTFV) diagnostics : 
+
+
+
+WITH activity_logs AS (
+    SELECT 
+        user_id, DATE(session_start) AS activity_date
+    FROM app_sessions
+    WHERE session_duration_seconds >= 30
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(last_sync_date)
+    FROM users 
+    WHERE last_sync_date IS NOT NULL
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(event_time)
+    FROM app_events 
+    WHERE feature_category IN ('Recovery', 'Strain', 'Sleep')
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(activity_start)
+    FROM activity_data
+    
+    UNION 
+    
+    SELECT 
+        user_id, DATE(calculated_at)
+    FROM daily_scores
+),
+
+signups AS (
+
+SELECT 
+ u.user_id , 
+  DATE(u.created_at) AS signup_date ,
+   DATE_FORMAT(u.created_at , '%Y-%m-01') AS cohort_month,
+    u.app_platform , u.acquisition_source,u.calibration_complete
+ FROM 
+  users u 
+),
+
+first_values AS (
+  SELECT
+    s.user_id,
+    s.app_platform,
+    s.acquisition_source,
+    s.signup_date,
+    -- earliest of the “value” signals
+    MIN(ev_date) AS first_value_date
+  FROM (
+    SELECT user_id, DATE(calculated_at) AS ev_date FROM daily_scores
+    UNION ALL
+    SELECT user_id, DATE(activity_start) FROM activity_data
+    UNION ALL
+    SELECT user_id, DATE(event_time) FROM app_events WHERE feature_category IN ('Recovery','Strain','Sleep')
+    UNION ALL
+    SELECT user_id, DATE(last_sync_date) FROM users WHERE last_sync_date IS NOT NULL
+  ) v
+  JOIN signups s USING (user_id)
+  WHERE ev_date BETWEEN s.signup_date AND DATE_ADD(s.signup_date, INTERVAL 30 DAY)
+  GROUP BY s.user_id, s.app_platform, s.acquisition_source, s.signup_date
+),
+
+ttfv AS (
+  SELECT
+    f.*,
+    DATEDIFF(f.first_value_date, f.signup_date) AS days_to_first_value
+  FROM first_values f
+)
+
+SELECT
+  app_platform,
+  acquisition_source,
+  COUNT(*) AS users_with_value_in_30d,
+  ROUND(AVG(days_to_first_value), 2) AS avg_days_to_first_value,
+  SUM(CASE WHEN days_to_first_value <= 1 THEN 1 ELSE 0 END) AS value_in_1d,
+  ROUND(100.0 * SUM(CASE WHEN days_to_first_value <= 1 THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_value_in_1d,
+  SUM(CASE WHEN days_to_first_value <= 7 THEN 1 ELSE 0 END) AS value_in_7d,
+  ROUND(100.0 * SUM(CASE WHEN days_to_first_value <= 7 THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_value_in_7d
+FROM ttfv
+GROUP BY app_platform, acquisition_source
+ORDER BY app_platform, acquisition_source;
